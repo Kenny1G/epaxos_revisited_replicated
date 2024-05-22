@@ -1,2 +1,3 @@
 config:
   gcp:project: cs244-423515
+  epaxosDir: "/Users/kennyosele/Documents/Projects/epaxos_revisited"

@@ -21,13 +21,14 @@ from pulumi_gcp.compute import (
 
 # Import the program's configuration settings.
 config = pulumi.Config()
+gcp_config = pulumi.Config("gcp")
 machine_type = config.get("machineType", "n1-standard-1")
 image_family = config.get("imageFamily", "ubuntu-pro-1804-lts")
 image_project = config.get("imageProject", "ubuntu-os-pro-cloud")
 epaxos_dir = config.get(
     "epaxosDir", "/Users/kennyosele/Documents/Projects/epaxos_revisited"
 )
-gcp_project = config.get("gcpProject", "cs244-423515")
+gcp_project = gcp_config.get("project", "cs244-423515")
 private_key_b64 = None
 # Derived values for instance naming
 LOCATION_TO_INDEX = {
