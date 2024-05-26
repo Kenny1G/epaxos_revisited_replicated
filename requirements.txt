@@ -12,6 +12,7 @@ parver==0.5
     # via
     #   pulumi-command
     #   pulumi-gcp
+    #   pulumiverse-time
 protobuf==4.25.3
     # via pulumi
 pulumi==3.116.1
@@ -19,9 +20,12 @@ pulumi==3.116.1
     #   -r requirements.in
     #   pulumi-command
     #   pulumi-gcp
+    #   pulumiverse-time
 pulumi-command==0.11.1
     # via -r requirements.in
 pulumi-gcp==7.23.0
+    # via -r requirements.in
+pulumiverse-time==0.0.17
     # via -r requirements.in
 pyyaml==6.0.1
     # via pulumi
@@ -30,5 +34,6 @@ semver==2.13.0
     #   pulumi
     #   pulumi-command
     #   pulumi-gcp
+    #   pulumiverse-time
 six==1.16.0
     # via pulumi
