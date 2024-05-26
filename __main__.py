@@ -125,6 +125,8 @@ sudo chown $(whoami):$(whoami) {SETUP_SCRIPT}
 
 
 DELAY_DURATION = "10s"
+
+
 # function to rsync the epaxos directory to newly created VM instances
 def rsync(loc: str):
     # generic variables for rsyncing to both server and client
@@ -194,17 +196,11 @@ def install(loc: str, depends_on: List[Output], first: bool = False):
         "go install client"
     )
 
-    server_remote_str: Output[str] = (
-        servers[loc].network_interfaces[0].access_configs[0].nat_ip
-    )
-    client_remote_str: Output[str] = (
-        clients[loc].network_interfaces[0].access_configs[0].nat_ip
-    )
-    def remote_install_command(name: str):
-        lambda str: remote.Command(
+    def remote_install_command(remote_str: str, name: str):
+        return remote.Command(
             f"command_install-{name}",
             connection=remote.ConnectionArgs(
-                host=server_remote_str,
+                host=remote_str,
                 user=unix_username,
                 private_key=base64.b64decode(the_key).decode("utf-8"),
             ),
@@ -212,24 +208,13 @@ def install(loc: str, depends_on: List[Output], first: bool = False):
             opts=ResourceOptions(depends_on=depends_on),
         )
 
-    server_remote_str.apply(
-        lambda str: remote.Command(
-            f"command_install-{server_name(loc)}",
-            connection=remote.ConnectionArgs(
-                host=server_remote_str,
-                user="kennyosele",
-                private_key=base64.b64decode(the_key).decode("utf-8"),
-            ),
-            create=install_command,
-            opts=ResourceOptions(depends_on=depends_on),
-        )
+    servers[loc].network_interfaces[0].access_configs[0].nat_ip.apply(
+        lambda str: remote_install_command(str, server_name(loc))
+    )
+    clients[loc].network_interfaces[0].access_configs[0].nat_ip.apply(
+        lambda str: remote_install_command(str, client_name(loc))
     )
 
-    # connection_client: remote.ConnectionArgs = remote.ConnectionArgs(
-    #     host=clients[loc].network_interfaces[0].access_configs[0].nat_ip,
-    #     user="kennyosele",
-    #     private_key=base64.b64decode(the_key).decode("utf-8"),
-    # )
 
 def create_instance(loc: str, name: str):
     return Instance(
@@ -241,6 +226,7 @@ def create_instance(loc: str, name: str):
         boot_disk=boot_disk,
         metadata_startup_script=setup_script,
     )
+
 
 for loc in locs:
     # Create VMs
