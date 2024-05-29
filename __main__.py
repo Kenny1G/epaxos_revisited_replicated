@@ -19,17 +19,16 @@ from pulumi_gcp.compute import (
 )
 import pulumiverse_time as time
 
-# from pulumi_gcp import storage
-
+#################################
+# Pulumi Configuration Settings #
+#################################
 # Import the program's configuration settings.
 config = pulumi.Config()
 gcp_config = pulumi.Config("gcp")
 machine_type = config.get("machineType", "n1-standard-1")
 image_family = config.get("imageFamily", "ubuntu-pro-1804-lts")
 image_project = config.get("imageProject", "ubuntu-os-pro-cloud")
-epaxos_dir = config.get(
-    "epaxosDir", "/Users/kennyosele/Documents/Projects/epaxos_revisited"
-)
+epaxos_dir = config.get("epaxosDir", "/Users/kennyosele/Documents/Projects/epaxos")
 gcp_project = gcp_config.get("project", "cs244-423515")
 unix_username = config.get("unixUsername", "kennyosele")
 # Private key for SSH access into the instances to run commands remotely
@@ -47,30 +46,14 @@ LOCATION_TO_INDEX = {
     "or": 3,
     "jp": 4,
 }
-# locs = ["or", "eu", "jp"]  # List of locations for your instances
-locs = ["or"]  # List of locations for your instances
+# locs = ["or", "eu", "jp", "ca", "va"]  # List of locations for your instances
+# List of locations where instances will be deployed
+locs = ["or"]
 
 
-# function to get the gcp zone string of a location
-def zone(loc):
-    return {
-        "ca": "us-west2-b",
-        "va": "us-east4-a",
-        "eu": "europe-west6-a",
-        "or": "us-west1-b",
-        "jp": "asia-northeast2-c",
-    }[loc]
-
-
-# function for consistent naming of servers and clients resources
-def server_name(loc):
-    return f"server-{loc}"
-
-
-def client_name(loc):
-    return f"client-{loc}"
-
-
+#######################################################
+# Constants for creating and configuring VM instances #
+#######################################################
 # --- Create instances ---
 # Data structures to track created resources
 servers: Dict[str, Instance] = {}
@@ -91,6 +74,9 @@ network_interfaces = [
 ]
 
 SETUP_SCRIPT = "/usr/local/bin/setup_epaxos.sh"
+epaxos_folder_name = epaxos_dir.split("/")[-1] if epaxos_dir else "epaxos"
+go_path = f"~/{epaxos_folder_name}"
+
 # Script that installs golang, the third party packages
 setup_script = f"""
 #!/bin/bash
@@ -110,7 +96,7 @@ sudo apt-get install python3-pip -y && pip3 install numpy
 cat << 'EOF' > {SETUP_SCRIPT}
 #!/bin/bash
 
-export GOPATH=~/epaxos_revisited
+export GOPATH={go_path}
 export PATH=$PATH:$GOPATH/bin:/usr/local/go/bin
 go get golang.org/x/sync/semaphore
 go get -u google.golang.org/grpc
@@ -124,7 +110,32 @@ sudo chown $(whoami):$(whoami) {SETUP_SCRIPT}
 """
 
 
-DELAY_DURATION = "10s"
+DELAY_DURATION = "1s"
+
+
+#############################################################
+# Helper Functions for creating and configuring VM instances#
+#############################################################
+
+
+# function to get the gcp zone string of a location
+def zone(loc):
+    return {
+        "ca": "us-west2-b",
+        "va": "us-east4-a",
+        "eu": "europe-west6-a",
+        "or": "us-west1-b",
+        "jp": "asia-northeast2-c",
+    }[loc]
+
+
+# function for consistent naming of servers and clients resources
+def server_name(loc):
+    return f"server-{loc}"
+
+
+def client_name(loc):
+    return f"client-{loc}"
 
 
 # function to rsync the epaxos directory to newly created VM instances
@@ -189,7 +200,7 @@ def install(loc: str, depends_on: List[Output], first: bool = False):
         install_command += "whoami && " f"ls /usr/local/bin && " f"{SETUP_SCRIPT} &&"
     install_command += (
         "export PATH=$PATH:/usr/local/go/bin && "
-        "export GOPATH=~/epaxos_revisited && "
+        f"export GOPATH={go_path}&& "
         "go clean && "
         "go install master && "
         "go install server && "
@@ -228,6 +239,10 @@ def create_instance(loc: str, name: str):
     )
 
 
+###################################################################
+# Declarative Code for creating VM instances and configuring them #
+###################################################################
+
 for loc in locs:
     # Create VMs
     servers[loc] = create_instance(loc, server_name(loc))
@@ -237,6 +252,8 @@ for loc in locs:
     # Run necessary commands remotely to install third party packages and epaxos binaries on the VM instances
     install(loc, [server_rsync, client_rsync], first=True)
 
+# TODO(kenny): Right now, I have the firewall rules already created in my Project.
+# Need to port that over to Pulumi.
 # Expose Ports (Firewall Rules)
 # mock_client_rule = gcp.compute.Firewall(
 #     "mock-client",

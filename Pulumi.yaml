@@ -2,7 +2,7 @@ name: epaxos_revisited_replicated
 runtime:
   name: python
   options:
-    virtualenv: venv
+    virtualenv: .venv
 description: Testing harness to re-evaluate epaxos
 config:
   pulumi:tags:
