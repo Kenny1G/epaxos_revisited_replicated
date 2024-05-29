@@ -1,7 +1,6 @@
 """A Google Cloud Python Pulumi program"""
 
 import base64
-from enum import Enum
 from typing import Dict, List
 import pulumi
 import pulumi_gcp as gcp
@@ -10,75 +9,47 @@ from pulumi.output import Output
 from pulumi.resource import ResourceOptions
 from pulumi_gcp.compute.outputs import InstanceNetworkInterface
 from pulumi_gcp.compute import (
-    Image,
     Instance,
     InstanceBootDiskInitializeParamsArgs,
     InstanceBootDiskArgs,
     InstanceNetworkInterfaceArgs,
     InstanceNetworkInterfaceAccessConfigArgs,
 )
+
 import pulumiverse_time as time
 
-#################################
-# Pulumi Configuration Settings #
-#################################
-# Import the program's configuration settings.
-config = pulumi.Config()
-gcp_config = pulumi.Config("gcp")
-machine_type = config.get("machineType", "n1-standard-1")
-image_family = config.get("imageFamily", "ubuntu-pro-1804-lts")
-image_project = config.get("imageProject", "ubuntu-os-pro-cloud")
-epaxos_dir = config.get("epaxosDir", "/Users/kennyosele/Documents/Projects/epaxos")
-gcp_project = gcp_config.get("project", "cs244-423515")
-unix_username = config.get("unixUsername", "kennyosele")
-# Private key for SSH access into the instances to run commands remotely
-# Associated public key must be added to the project's metadata
-private_key_b64 = private_key_b64 = config.get(
-    "privateKeyB64",
-    "LS0tLS1CRUdJTiBPUEVOU1NIIFBSSVZBVEUgS0VZLS0tLS0KYjNCbGJuTnphQzFyWlhrdGRqRUFBQUFBQkc1dmJtVUFBQUFFYm05dVpRQUFBQUFBQUFBQkFBQUFNd0FBQUF0emMyZ3RaVwpReU5UVXhPUUFBQUNCMHdUUkN4TmNNQlhDdEtvQmtyR29hR0NkcjdqaURVLzIzY3dUcFVsWDVxd0FBQUtBZHVnSFdIYm9CCjFnQUFBQXR6YzJndFpXUXlOVFV4T1FBQUFDQjB3VFJDeE5jTUJYQ3RLb0JrckdvYUdDZHI3amlEVS8yM2N3VHBVbFg1cXcKQUFBRUE0bEhHZFFQWm9haGdNRFNYRFNPWllqcEJkellhbXpHWVNoTFYxZ1BkZnhIVEJORUxFMXd3RmNLMHFnR1NzYWhvWQpKMnZ1T0lOVC9iZHpCT2xTVmZtckFBQUFGMnRsYm01NU1XZEFZM011YzNSaGJtWnZjbVF1WldSMUFRSURCQVVHCi0tLS0tRU5EIE9QRU5TU0ggUFJJVkFURSBLRVktLS0tLQ==",
-)
 
-# Derived values for instance naming
-LOCATION_TO_INDEX = {
-    "ca": 0,
-    "va": 1,
-    "eu": 2,
-    "or": 3,
-    "jp": 4,
-}
-# locs = ["or", "eu", "jp", "ca", "va"]  # List of locations for your instances
-# List of locations where instances will be deployed
-locs = ["or"]
+SETUP_SCRIPT_PATH = "/usr/local/bin/setup_epaxos.sh"
 
 
-#######################################################
-# Constants for creating and configuring VM instances #
-#######################################################
-# --- Create instances ---
-# Data structures to track created resources
-servers: Dict[str, Instance] = {}
-clients: Dict[str, Instance] = {}
+class GCloudInstance:
+    def __init__(self, config, loc):
+        self.config = config
+        self.loc = loc
+        self.machine_type = config.get("machineType", "n1-standard-1")
+        self.image_family = config.get("imageFamily", "ubuntu-pro-1804-lts")
+        self.image_project = config.get("imageProject", "ubuntu-os-pro-cloud")
+        self.epaxos_dir = config.get(
+            "epaxosDir", "/Users/kennyosele/Documents/Projects/epaxos"
+        )
+        self.unix_username = config.get("unixUsername", "kennyosele")
+        self.private_key_b64 = config.get(
+            "privateKeyB64",
+            "LS0tLS1CRUdJTiBPUEVOU1NIIFBSSVZBVEUgS0VZLS0tLS0KYjNCbGJuTnphQzFyWlhrdGRqRUFBQUFBQkc1dmJtVUFBQUFFYm05dVpRQUFBQUFBQUFBQkFBQUFNd0FBQUF0emMyZ3RaVwpReU5UVXhPUUFBQUNCMHdUUkN4TmNNQlhDdEtvQmtyR29hR0NkcjdqaURVLzIzY3dUcFVsWDVxd0FBQUtBZHVnSFdIYm9CCjFnQUFBQXR6YzJndFpXUXlOVFV4T1FBQUFDQjB3VFJDeE5jTUJYQ3RLb0JrckdvYUdDZHI3amlEVS8yM2N3VHBVbFg1cXcKQUFBRUE0bEhHZFFQWm9haGdNRFNYRFNPWllqcEJkellhbXpHWVNoTFYxZ1BkZnhIVEJORUxFMXd3RmNLMHFnR1NzYWhvWQpKMnZ1T0lOVC9iZHpCT2xTVmZtckFBQUFGMnRsYm01NU1XZEFZM011YzNSaGJtWnZjbVF1WldSMUFRSURCQVVHCi0tLS0tRU5EIE9QRU5TU0ggUFJJVkFURSBLRVktLS0tLQ==",
+        )
 
-# fields we need to create a pulumi instance resource
-boot_disk = InstanceBootDiskArgs(
-    initialize_params=InstanceBootDiskInitializeParamsArgs(
-        # image=f"projects/{image_project}/global/images/family/{image_family}",
-        image="https://www.googleapis.com/compute/beta/projects/ubuntu-os-pro-cloud/global/images/ubuntu-pro-1804-bionic-v20240516"
-    ),
-)
-network_interfaces = [
-    InstanceNetworkInterfaceArgs(
-        access_configs=[InstanceNetworkInterfaceAccessConfigArgs()],
-        network="default",
-    )
-]
+        self.go_path = None
+        self.setup_script = self.create_setup_script()
 
-SETUP_SCRIPT = "/usr/local/bin/setup_epaxos.sh"
-epaxos_folder_name = epaxos_dir.split("/")[-1] if epaxos_dir else "epaxos"
-go_path = f"~/{epaxos_folder_name}"
+        self.instance = None
+        self.rsync = None
 
-# Script that installs golang, the third party packages
-setup_script = f"""
+    def create_setup_script(self):
+        epaxos_folder_name = (
+            self.epaxos_dir.split("/")[-1] if self.epaxos_dir else "epaxos"
+        )
+        self.go_path = f"~/{epaxos_folder_name}"
+        return f"""
 #!/bin/bash
 
 #Install golang
@@ -91,12 +62,11 @@ sudo mv go /usr/local
 # For client metrics script
 sudo apt-get install python3-pip -y && pip3 install numpy
 
-
 # Write commands to a script in the home directory
-cat << 'EOF' > {SETUP_SCRIPT}
+cat << 'EOF' > {SETUP_SCRIPT_PATH}
 #!/bin/bash
 
-export GOPATH={go_path}
+export GOPATH={self.go_path}
 export PATH=$PATH:$GOPATH/bin:/usr/local/go/bin
 go get golang.org/x/sync/semaphore
 go get -u google.golang.org/grpc
@@ -105,187 +75,135 @@ go get -u github.com/VividCortex/ewma
 EOF
 
 # Make the script executable
-chmod +x {SETUP_SCRIPT}
-sudo chown $(whoami):$(whoami) {SETUP_SCRIPT}
+chmod +x {SETUP_SCRIPT_PATH}
+sudo chown $(whoami):$(whoami) {SETUP_SCRIPT_PATH}
 """
 
+    def install(self):
+        if self.go_path is None:
+            raise ValueError("go_path is not set")
+        if self.rsync is None:
+            raise ValueError(
+                f"rsync has not been run on instance: {self.id()}, did create_instance() fail?"
+            )
+        if self.private_key_b64 is None:
+            raise ValueError("private_key_b64 needs to be set in pulumi config")
 
-DELAY_DURATION = "1s"
-
-
-#############################################################
-# Helper Functions for creating and configuring VM instances#
-#############################################################
-
-
-# function to get the gcp zone string of a location
-def zone(loc):
-    return {
-        "ca": "us-west2-b",
-        "va": "us-east4-a",
-        "eu": "europe-west6-a",
-        "or": "us-west1-b",
-        "jp": "asia-northeast2-c",
-    }[loc]
-
-
-# function for consistent naming of servers and clients resources
-def server_name(loc):
-    return f"server-{loc}"
-
-
-def client_name(loc):
-    return f"client-{loc}"
-
-
-# function to rsync the epaxos directory to newly created VM instances
-def rsync(loc: str):
-    # generic variables for rsyncing to both server and client
-    sshopts = "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-    rsync_command = (
-        'rsync --delete --exclude-from "{f}/.gitignore" '
-        '-re "{sshopts}" {f} {remote}:~'
-    )
-
-    # rsync the epaxos directory to the server at this location
-    wait30_seconds = time.Sleep(
-        f"time_rsync_delay-{server_name(loc)}",
-        create_duration=DELAY_DURATION,
-        opts=ResourceOptions(depends_on=[servers[loc]]),
-    )
-    server_remote_str: Output[str] = (
-        servers[loc].network_interfaces[0].access_configs[0].nat_ip
-    )
-    server_rsync = server_remote_str.apply(
-        lambda str: local.Command(
-            f"command_rsync-{server_name(loc)}",
-            create=rsync_command.format(
-                sshopts=sshopts,
-                f=epaxos_dir,
-                remote=str,
-            ),
-            opts=ResourceOptions(depends_on=[wait30_seconds]),
+        install_command = (
+            f"{SETUP_SCRIPT_PATH} && "
+            "export PATH=$PATH:/usr/local/go/bin && "
+            f"export GOPATH={self.go_path} && "
+            "go clean && "
+            "go install master && "
+            "go install server && "
+            "go install client"
         )
-    )
-
-    # rsync the epaxos directory to the client at this location
-    wait30_seconds = time.Sleep(
-        f"time_rsync_delay-{client_name(loc)}",
-        create_duration=DELAY_DURATION,
-        opts=ResourceOptions(depends_on=[clients[loc]]),
-    )
-    client_remote_str: Output[str] = (
-        clients[loc].network_interfaces[0].access_configs[0].nat_ip
-    )
-    client_rsync = client_remote_str.apply(
-        lambda str: local.Command(
-            f"command_rsync-{client_name(loc)}",
-            create=rsync_command.format(
-                sshopts=sshopts,
-                f=epaxos_dir,
-                remote=str,
-            ),
-            opts=ResourceOptions(depends_on=[wait30_seconds]),
-        )
-    )
-
-    return (client_rsync, server_rsync)
-
-
-# Function to install the third party packages and epaxos binaries on the VM instances
-def install(loc: str, depends_on: List[Output], first: bool = False):
-    the_key = private_key_b64 if private_key_b64 else ""
-    install_command = ""
-    if first:
-        install_command += "whoami && " f"ls /usr/local/bin && " f"{SETUP_SCRIPT} &&"
-    install_command += (
-        "export PATH=$PATH:/usr/local/go/bin && "
-        f"export GOPATH={go_path}&& "
-        "go clean && "
-        "go install master && "
-        "go install server && "
-        "go install client"
-    )
-
-    def remote_install_command(remote_str: str, name: str):
-        return remote.Command(
-            f"command_install-{name}",
-            connection=remote.ConnectionArgs(
-                host=remote_str,
-                user=unix_username,
-                private_key=base64.b64decode(the_key).decode("utf-8"),
-            ),
-            create=install_command,
-            opts=ResourceOptions(depends_on=depends_on),
+        self.instance.network_interfaces[0].access_configs[0].nat_ip.apply(
+            lambda str: remote.Command(
+                f"command_install-{self.id()}",
+                connection=remote.ConnectionArgs(
+                    host=str,
+                    user=self.unix_username,
+                    private_key=base64.b64decode(self.private_key_b64).decode("utf-8"),
+                ),
+                create=install_command,
+                opts=ResourceOptions(depends_on=[self.instance]),
+            )
         )
 
-    servers[loc].network_interfaces[0].access_configs[0].nat_ip.apply(
-        lambda str: remote_install_command(str, server_name(loc))
-    )
-    clients[loc].network_interfaces[0].access_configs[0].nat_ip.apply(
-        lambda str: remote_install_command(str, client_name(loc))
-    )
+    def run_rsync(self):
+        sshopts = "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+        rsync_command = (
+            'rsync --delete --exclude-from "{f}/.gitignore" '
+            '-re "{sshopts}" {f} {remote}:~'
+        )
+        remote_str = self.instance.network_interfaces[0].access_configs[0].nat_ip
+        self.rsync = remote_str.apply(
+            lambda str: local.Command(
+                f"command_rsync-{self.id()}",
+                create=rsync_command.format(
+                    sshopts=sshopts,
+                    f=self.epaxos_dir,
+                    remote=str,
+                ),
+                opts=ResourceOptions(depends_on=[self.instance]),
+            )
+        )
+
+    def create_instance(self, name=None):
+        if name is None:
+            name = self.id()
+
+        boot_disk = InstanceBootDiskArgs(
+            initialize_params=InstanceBootDiskInitializeParamsArgs(
+                image="https://www.googleapis.com/compute/beta/projects/ubuntu-os-pro-cloud/global/images/ubuntu-pro-1804-bionic-v20240516"
+            ),
+        )
+        network_interfaces = [
+            InstanceNetworkInterfaceArgs(
+                access_configs=[InstanceNetworkInterfaceAccessConfigArgs()],
+                network="default",
+            )
+        ]
+        self.instance = Instance(
+            f"instance-{name}",
+            network_interfaces=network_interfaces,
+            name=name,
+            machine_type=self.machine_type,
+            zone=self.zone(),
+            boot_disk=boot_disk,
+            metadata_startup_script=self.setup_script,
+        )
+        pulumi.export(
+            f"{name}_public_ip",
+            self.instance.network_interfaces[0].access_configs[0].nat_ip,
+        )
+
+    def zone(self):
+        return {
+            "ca": "us-west2-b",
+            "va": "us-east4-a",
+            "eu": "europe-west6-a",
+            "or": "us-west1-b",
+            "jp": "asia-northeast2-c",
+        }[self.loc]
 
 
-def create_instance(loc: str, name: str):
-    return Instance(
-        f"instance-{name}",
-        network_interfaces=network_interfaces,
-        name=name,
-        machine_type=machine_type,
-        zone=zone(loc),
-        boot_disk=boot_disk,
-        metadata_startup_script=setup_script,
-    )
+class GCloudMaster(GCloudInstance):
+    def __init__(self, config, loc):
+        super().__init__(config, loc)
 
 
-###################################################################
-# Declarative Code for creating VM instances and configuring them #
-###################################################################
+class GCloudServer(GCloudInstance):
+    def id(self):
+        return f"server-{self.loc}"
 
-for loc in locs:
-    # Create VMs
-    servers[loc] = create_instance(loc, server_name(loc))
-    clients[loc] = create_instance(loc, client_name(loc))
-    # Run Rsync locally to copy the epaxos directory to the VM instances
-    server_rsync, client_rsync = rsync(loc)
-    # Run necessary commands remotely to install third party packages and epaxos binaries on the VM instances
-    install(loc, [server_rsync, client_rsync], first=True)
 
-# TODO(kenny): Right now, I have the firewall rules already created in my Project.
-# Need to port that over to Pulumi.
-# Expose Ports (Firewall Rules)
-# mock_client_rule = gcp.compute.Firewall(
-#     "mock-client",
-#     allows=[
-#         gcp.compute.FirewallAllowArgs(
-#             protocol="tcp",
-#             ports=["7000-8000"],
-#         ),
-#     ],
-#     source_ranges=["0.0.0.0/0"],
-#     source_tags=[s.name for s in servers.values()],
-# )
+class GCloudClient(GCloudInstance):
+    def id(self):
+        return f"client-{self.loc}"
 
-# clock_sync_ui_rule = gcp.compute.Firewall(
-#     "clock-sync-ui",
-#     allows=[
-#         gcp.compute.FirewallAllowArgs(
-#             protocol="tcp",
-#             ports=["9001"],
-#         ),
-#     ],
-#     source_ranges=["0.0.0.0/0"],
-#     source_tags=[servers[locs[0]].name],  # Assuming the first server is the master
-# )
 
-# Export the ip addresses of compute instances
-for loc in locs:
-    pulumi.export(
-        f"{server_name(loc)}_public_ip",
-        servers[loc].network_interfaces[0].access_configs[0].nat_ip,
-    )
-    pulumi.export(
-        f"{client_name(loc)}_public_ip",
-        clients[loc].network_interfaces[0].access_configs[0].nat_ip,
-    )
+class EPaxosDeployment:
+    def __init__(self, config):
+        self.config = config
+        self.locs = ["or"]
+        self.servers = {loc: GCloudServer(config, loc) for loc in self.locs}
+        self.clients = {loc: GCloudClient(config, loc) for loc in self.locs}
+        self.master = GCloudMaster(config, self.locs[0])
+
+    def deploy(self):
+        def deploy_instance(instance):
+            instance.create_instance()
+            instance.run_rsync()
+            instance.install()
+
+        for loc in self.locs:
+            deploy_instance(self.servers[loc])
+            deploy_instance(self.clients[loc])
+
+
+# Main execution
+config = pulumi.Config()
+deployment = EPaxosDeployment(config)
+deployment.deploy()
