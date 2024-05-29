@@ -1,13 +1,9 @@
 """A Google Cloud Python Pulumi program"""
 
 import base64
-from typing import Dict, List
 import pulumi
-import pulumi_gcp as gcp
 from pulumi_command import remote, local
-from pulumi.output import Output
 from pulumi.resource import ResourceOptions
-from pulumi_gcp.compute.outputs import InstanceNetworkInterface
 from pulumi_gcp.compute import (
     Instance,
     InstanceBootDiskInitializeParamsArgs,
@@ -16,7 +12,6 @@ from pulumi_gcp.compute import (
     InstanceNetworkInterfaceAccessConfigArgs,
 )
 
-import pulumiverse_time as time
 
 
 SETUP_SCRIPT_PATH = "/usr/local/bin/setup_epaxos.sh"
@@ -107,7 +102,7 @@ sudo chown $(whoami):$(whoami) {SETUP_SCRIPT_PATH}
                     private_key=base64.b64decode(self.private_key_b64).decode("utf-8"),
                 ),
                 create=install_command,
-                opts=ResourceOptions(depends_on=[self.instance]),
+                opts=ResourceOptions(depends_on=[self.rsync]),
             )
         )
 
