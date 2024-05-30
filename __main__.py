@@ -2,6 +2,8 @@
 
 import base64
 import pulumi
+from typing import List
+from pulumi import Output
 from pulumi_command import remote, local
 from pulumi.resource import ResourceOptions
 from pulumi_gcp.compute import (
@@ -13,8 +15,8 @@ from pulumi_gcp.compute import (
 )
 
 
-
 SETUP_SCRIPT_PATH = "/usr/local/bin/setup_epaxos.sh"
+VM_IMAGE_URL = "https://www.googleapis.com/compute/beta/projects/ubuntu-os-pro-cloud/global/images/ubuntu-pro-1804-bionic-v20240516"
 
 
 class GCloudInstance:
@@ -36,8 +38,9 @@ class GCloudInstance:
         self.go_path = None
         self.setup_script = self.create_setup_script()
 
-        self.instance = None
-        self.rsync = None
+        self.instance_resource = None
+        self.rsync_resource = None
+        self.install_resource = None
 
     def create_setup_script(self):
         epaxos_folder_name = (
@@ -74,18 +77,25 @@ chmod +x {SETUP_SCRIPT_PATH}
 sudo chown $(whoami):$(whoami) {SETUP_SCRIPT_PATH}
 """
 
-    def install(self):
+    def run_go_installs(self):
         if self.go_path is None:
             raise ValueError("go_path is not set")
-        if self.rsync is None:
+        if self.rsync_resource is None:
             raise ValueError(
                 f"rsync has not been run on instance: {self.id()}, did create_instance() fail?"
             )
         if self.private_key_b64 is None:
             raise ValueError("private_key_b64 needs to be set in pulumi config")
 
+        run_setup_script = f"""\
+until {SETUP_SCRIPT_PATH}
+do
+    echo "Try again"
+    sleep 2
+done
+"""
         install_command = (
-            f"{SETUP_SCRIPT_PATH} && "
+            f"$({run_setup_script}) && "
             "export PATH=$PATH:/usr/local/go/bin && "
             f"export GOPATH={self.go_path} && "
             "go clean && "
@@ -93,17 +103,26 @@ sudo chown $(whoami):$(whoami) {SETUP_SCRIPT_PATH}
             "go install server && "
             "go install client"
         )
-        self.instance.network_interfaces[0].access_configs[0].nat_ip.apply(
-            lambda str: remote.Command(
-                f"command_install-{self.id()}",
-                connection=remote.ConnectionArgs(
-                    host=str,
-                    user=self.unix_username,
-                    private_key=base64.b64decode(self.private_key_b64).decode("utf-8"),
-                ),
-                create=install_command,
-                opts=ResourceOptions(depends_on=[self.rsync]),
+        self.install_resource = (
+            self.instance_resource.network_interfaces[0]
+            .access_configs[0]
+            .nat_ip.apply(
+                lambda str: remote.Command(
+                    f"command_install-{self.id()}",
+                    connection=remote.ConnectionArgs(
+                        host=str,
+                        user=self.unix_username,
+                        private_key=base64.b64decode(self.private_key_b64).decode(
+                            "utf-8"
+                        ),
+                    ),
+                    create=install_command,
+                    opts=ResourceOptions(depends_on=[self.rsync_resource]),
+                )
             )
+        )
+        pulumi.export(
+            f"output_run_go_installs-{self.id()}", self.install_resource.stdout
         )
 
     def run_rsync(self):
@@ -112,8 +131,10 @@ sudo chown $(whoami):$(whoami) {SETUP_SCRIPT_PATH}
             'rsync --delete --exclude-from "{f}/.gitignore" '
             '-re "{sshopts}" {f} {remote}:~'
         )
-        remote_str = self.instance.network_interfaces[0].access_configs[0].nat_ip
-        self.rsync = remote_str.apply(
+        remote_str = (
+            self.instance_resource.network_interfaces[0].access_configs[0].nat_ip
+        )
+        self.rsync_resource = remote_str.apply(
             lambda str: local.Command(
                 f"command_rsync-{self.id()}",
                 create=rsync_command.format(
@@ -121,17 +142,17 @@ sudo chown $(whoami):$(whoami) {SETUP_SCRIPT_PATH}
                     f=self.epaxos_dir,
                     remote=str,
                 ),
-                opts=ResourceOptions(depends_on=[self.instance]),
+                opts=ResourceOptions(depends_on=[self.instance_resource]),
             )
         )
+        pulumi.export(f"output_run_rsync-{self.id()}", self.rsync_resource.stdout)
 
-    def create_instance(self, name=None):
-        if name is None:
-            name = self.id()
+    def create_instance(self):
+        name = self.id()
 
         boot_disk = InstanceBootDiskArgs(
             initialize_params=InstanceBootDiskInitializeParamsArgs(
-                image="https://www.googleapis.com/compute/beta/projects/ubuntu-os-pro-cloud/global/images/ubuntu-pro-1804-bionic-v20240516"
+                image=VM_IMAGE_URL,
             ),
         )
         network_interfaces = [
@@ -140,8 +161,8 @@ sudo chown $(whoami):$(whoami) {SETUP_SCRIPT_PATH}
                 network="default",
             )
         ]
-        self.instance = Instance(
-            f"instance-{name}",
+        self.instance_resource = Instance(
+            f"instance_{name}",
             network_interfaces=network_interfaces,
             name=name,
             machine_type=self.machine_type,
@@ -150,8 +171,8 @@ sudo chown $(whoami):$(whoami) {SETUP_SCRIPT_PATH}
             metadata_startup_script=self.setup_script,
         )
         pulumi.export(
-            f"{name}_public_ip",
-            self.instance.network_interfaces[0].access_configs[0].nat_ip,
+            f"public_ip-{name}",
+            self.instance_resource.network_interfaces[0].access_configs[0].nat_ip,
         )
 
     def zone(self):
@@ -164,14 +185,44 @@ sudo chown $(whoami):$(whoami) {SETUP_SCRIPT_PATH}
         }[self.loc]
 
 
+class GCloudServer(GCloudInstance):
+    def id(self):
+        return f"server-{self.loc}"
+
+
 class GCloudMaster(GCloudInstance):
     def __init__(self, config, loc):
         super().__init__(config, loc)
 
-
-class GCloudServer(GCloudInstance):
     def id(self):
-        return f"server-{self.loc}"
+        return f"master-{self.loc}"
+
+    def run_master(self, server_instances: List[GCloudServer]):
+        if self.install_resource is None:
+            raise ValueError("Master instance is not ready")
+        master_command = (
+            "cd epaxos && " "bin/master -N {len_ips} -ips {ips} > moutput.txt 2>&1 &"
+        )
+        output_run_master = Output.all(
+            self.instance_resource.network_interfaces[0].access_configs[0].nat_ip,
+            *[
+                server.instance_resource.network_interfaces[0].network_ip
+                for server in server_instances
+            ]
+        ).apply(
+            lambda ips: remote.Command(
+                "command_run-master",
+                connection=remote.ConnectionArgs(
+                    host=ips[0],
+                    user=self.unix_username,
+                    private_key=base64.b64decode(self.private_key_b64).decode("utf-8"),
+                ),
+                create=master_command.format(len_ips=len(ips) - 1, ips=",".join(ips[1:])),
+                opts=ResourceOptions(depends_on=[self.install_resource]),
+            )
+        )
+
+        pulumi.export("output_run-master", output_run_master.stdout)
 
 
 class GCloudClient(GCloudInstance):
@@ -180,9 +231,9 @@ class GCloudClient(GCloudInstance):
 
 
 class EPaxosDeployment:
-    def __init__(self, config):
+    def __init__(self, config, locs=["or", "eu", "va"]):
         self.config = config
-        self.locs = ["or"]
+        self.locs = locs
         self.servers = {loc: GCloudServer(config, loc) for loc in self.locs}
         self.clients = {loc: GCloudClient(config, loc) for loc in self.locs}
         self.master = GCloudMaster(config, self.locs[0])
@@ -191,14 +242,22 @@ class EPaxosDeployment:
         def deploy_instance(instance):
             instance.create_instance()
             instance.run_rsync()
-            instance.install()
+            instance.run_go_installs()
 
+        deploy_instance(self.master)
         for loc in self.locs:
             deploy_instance(self.servers[loc])
             deploy_instance(self.clients[loc])
+
+    def run(self):
+        # while self.master.install_resource is None:
+        #     pulumi.log.info("Waiting for installation resources to be ready...")
+        #     pulumi.runtime.sleep(10)
+        self.master.run_master(self.servers.values())
 
 
 # Main execution
 config = pulumi.Config()
 deployment = EPaxosDeployment(config)
 deployment.deploy()
+deployment.run()
