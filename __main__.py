@@ -15,11 +15,39 @@ from pulumi_gcp.compute import (
 )
 
 
+LOCATION_TO_INDEX = {
+    "ca": 0,
+    "va": 1,
+    "eu": 2,
+    "or": 3,
+    "jp": 4,
+}
 SETUP_SCRIPT_PATH = "/usr/local/bin/setup_epaxos.sh"
 VM_IMAGE_URL = "https://www.googleapis.com/compute/beta/projects/ubuntu-os-pro-cloud/global/images/ubuntu-pro-1804-bionic-v20240516"
 
 
 class GCloudInstance:
+    def id(self):
+        raise NotImplementedError()
+
+    def ip(self):
+        if self.instance_resource is None:
+            raise ValueError(
+                f"""
+                instance has not been created on {self.loc}
+                """
+            )
+        return self.instance_resource.network_interfaces[0].access_configs[0].nat_ip
+
+    def internal_ip(self):
+        if self.instance_resource is None:
+            raise ValueError(
+                f"""
+                instance has not been created on {self.loc}
+                """
+            )
+        return self.instance_resource.network_interfaces[0].network_ip
+
     def __init__(self, config, loc):
         self.config = config
         self.loc = loc
@@ -41,6 +69,7 @@ class GCloudInstance:
         self.instance_resource = None
         self.rsync_resource = None
         self.install_resource = None
+        self.run_resource = None
 
     def create_setup_script(self):
         epaxos_folder_name = (
@@ -77,13 +106,39 @@ chmod +x {SETUP_SCRIPT_PATH}
 sudo chown $(whoami):$(whoami) {SETUP_SCRIPT_PATH}
 """
 
+    def run_remote_command(
+        self,
+        resource_prefix,
+        command,
+        host_str,
+        delete_command=None,
+        this_resource=None,
+    ):
+        return remote.Command(
+            f"{resource_prefix}-{self.id()}",
+            connection=remote.ConnectionArgs(
+                host=host_str,
+                user=self.unix_username,
+                private_key=base64.b64decode(self.private_key_b64).decode("utf-8"),
+            ),
+            create=command,
+            delete=delete_command,
+            opts=ResourceOptions(
+                depends_on=[
+                    r
+                    for r in [
+                        self.install_resource,
+                        self.rsync_resource,
+                        self.instance_resource,
+                    ]
+                    if r is not None and r != this_resource
+                ]
+            ),
+        )
+
     def run_go_installs(self):
         if self.go_path is None:
             raise ValueError("go_path is not set")
-        if self.rsync_resource is None:
-            raise ValueError(
-                f"rsync has not been run on instance: {self.id()}, did create_instance() fail?"
-            )
         if self.private_key_b64 is None:
             raise ValueError("private_key_b64 needs to be set in pulumi config")
 
@@ -103,22 +158,12 @@ done
             "go install server && "
             "go install client"
         )
-        self.install_resource = (
-            self.instance_resource.network_interfaces[0]
-            .access_configs[0]
-            .nat_ip.apply(
-                lambda str: remote.Command(
-                    f"command_install-{self.id()}",
-                    connection=remote.ConnectionArgs(
-                        host=str,
-                        user=self.unix_username,
-                        private_key=base64.b64decode(self.private_key_b64).decode(
-                            "utf-8"
-                        ),
-                    ),
-                    create=install_command,
-                    opts=ResourceOptions(depends_on=[self.rsync_resource]),
-                )
+        self.install_resource = self.ip().apply(
+            lambda host_str: self.run_remote_command(
+                "command_install",
+                install_command,
+                host_str,
+                this_resource=self.install_resource,
             )
         )
         pulumi.export(
@@ -131,10 +176,7 @@ done
             'rsync --delete --exclude-from "{f}/.gitignore" '
             '-re "{sshopts}" {f} {remote}:~'
         )
-        remote_str = (
-            self.instance_resource.network_interfaces[0].access_configs[0].nat_ip
-        )
-        self.rsync_resource = remote_str.apply(
+        self.rsync_resource = self.ip().apply(
             lambda str: local.Command(
                 f"command_rsync-{self.id()}",
                 create=rsync_command.format(
@@ -142,7 +184,9 @@ done
                     f=self.epaxos_dir,
                     remote=str,
                 ),
-                opts=ResourceOptions(depends_on=[self.instance_resource]),
+                opts=ResourceOptions(
+                    depends_on=[r for r in [self.instance_resource] if r is not None]
+                ),
             )
         )
         pulumi.export(f"output_run_rsync-{self.id()}", self.rsync_resource.stdout)
@@ -189,6 +233,22 @@ class GCloudServer(GCloudInstance):
     def id(self):
         return f"server-{self.loc}"
 
+    def run(self, master_ip_output):
+        def lambda_helper(internal_ip, external_ip, master_ip):
+            port = 7070 + LOCATION_TO_INDEX[self.loc]
+            flags = f" -port {port} -maddr {master_ip} -addr {internal_ip} -e "
+            server_command = "cd epaxos && " "bin/server {} > output.txt 2>&1 &".format(
+                flags
+            )
+            delete_command = "kill $(pidof bin/server)"
+            self.run_remote_command(
+                "run_command", server_command, external_ip, delete_command
+            )
+
+        self.run_resource = Output.all(
+            self.internal_ip(), self.ip(), master_ip_output
+        ).apply(lambda args: lambda_helper(*args))
+
 
 class GCloudMaster(GCloudInstance):
     def __init__(self, config, loc):
@@ -200,29 +260,27 @@ class GCloudMaster(GCloudInstance):
     def run_master(self, server_instances: List[GCloudServer]):
         if self.install_resource is None:
             raise ValueError("Master instance is not ready")
+        if self.instance_resource is None:
+            raise ValueError(
+                f"instance_resource has not been set on instance: {self.id()}, did create_instance() fail?"
+            )
         master_command = (
             "cd epaxos && " "bin/master -N {len_ips} -ips {ips} > moutput.txt 2>&1 &"
         )
-        output_run_master = Output.all(
-            self.instance_resource.network_interfaces[0].access_configs[0].nat_ip,
+        self.run_resource = Output.all(
+            self.ip(),
             *[
                 server.instance_resource.network_interfaces[0].network_ip
                 for server in server_instances
-            ]
+                if server.instance_resource is not None
+            ],
         ).apply(
-            lambda ips: remote.Command(
-                "command_run-master",
-                connection=remote.ConnectionArgs(
-                    host=ips[0],
-                    user=self.unix_username,
-                    private_key=base64.b64decode(self.private_key_b64).decode("utf-8"),
-                ),
-                create=master_command.format(len_ips=len(ips) - 1, ips=",".join(ips[1:])),
-                opts=ResourceOptions(depends_on=[self.install_resource]),
+            lambda ips: self.run_remote_command(
+                "command_run",
+                master_command.format(len_ips=len(ips) - 1, ips=",".join(ips[1:])),
+                ips[0],
             )
         )
-
-        pulumi.export("output_run-master", output_run_master.stdout)
 
 
 class GCloudClient(GCloudInstance):
@@ -253,7 +311,11 @@ class EPaxosDeployment:
         # while self.master.install_resource is None:
         #     pulumi.log.info("Waiting for installation resources to be ready...")
         #     pulumi.runtime.sleep(10)
-        self.master.run_master(self.servers.values())
+        pulumi.info("Running master...")
+        self.master.run_master(list(self.servers.values()))
+        pulumi.info("Running servers...")
+        for server in self.servers.values():
+            server.run(self.master.internal_ip())
 
 
 # Main execution
