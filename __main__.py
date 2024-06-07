@@ -267,41 +267,6 @@ class GCloudServer(GCloudInstance):
         ).apply(lambda args: lambda_helper(*args))
 
 
-class GCloudMaster(GCloudInstance):
-    def __init__(self, config, loc):
-        super().__init__(config, loc)
-
-    def id(self):
-        return f"master-{self.loc}"
-
-    def run_master(self, server_instances: List[GCloudServer]):
-        if self.install_resource is None:
-            raise ValueError("Master instance is not ready")
-        if self.instance_resource is None:
-            raise ValueError(
-                f"instance_resource has not been set on instance: {self.id()}, did create_instance() fail?"
-            )
-        master_command = (
-            "cd epaxos && "
-            "nohup bin/master -N {len_ips} -ips {ips} > moutput.txt 2>&1 &"
-        )
-        self.run_resource = Output.all(
-            self.ip(),
-            *[
-                server.instance_resource.network_interfaces[0].network_ip
-                for server in server_instances
-                if server.instance_resource is not None
-            ],
-        ).apply(
-            lambda ips: self.run_remote_command(
-                "run_command",
-                master_command.format(len_ips=len(ips) - 1, ips=",".join(ips[1:])),
-                ips[0],
-                delete_command="kill $(pidof bin/master)",
-            )
-        )
-
-
 class GCloudClient(GCloudInstance):
     def id(self):
         return f"client-{self.loc}"
@@ -349,6 +314,41 @@ class GCloudClient(GCloudInstance):
             )
         )
         pulumi.export(f"metrics-{self.id()}", self.metrics_resource.stdout)
+
+
+class GCloudMaster(GCloudInstance):
+    def __init__(self, config, loc):
+        super().__init__(config, loc)
+
+    def id(self):
+        return f"master-{self.loc}"
+
+    def run_master(self, server_instances: List[GCloudServer]):
+        if self.install_resource is None:
+            raise ValueError("Master instance is not ready")
+        if self.instance_resource is None:
+            raise ValueError(
+                f"instance_resource has not been set on instance: {self.id()}, did create_instance() fail?"
+            )
+        master_command = (
+            "cd epaxos && "
+            "nohup bin/master -N {len_ips} -ips {ips} > moutput.txt 2>&1 &"
+        )
+        self.run_resource = Output.all(
+            self.ip(),
+            *[
+                server.instance_resource.network_interfaces[0].network_ip
+                for server in server_instances
+                if server.instance_resource is not None
+            ],
+        ).apply(
+            lambda ips: self.run_remote_command(
+                "run_command",
+                master_command.format(len_ips=len(ips) - 1, ips=",".join(ips[1:])),
+                ips[0],
+                delete_command="kill $(pidof bin/master)",
+            )
+        )
 
 
 class EPaxosDeployment:
