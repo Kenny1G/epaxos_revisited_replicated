@@ -183,9 +183,6 @@ done
                 this_resource=self.install_resource,
             )
         )
-        pulumi.export(
-            f"output_run_go_installs-{self.id()}", self.install_resource.stdout
-        )
 
     def run_rsync(self):
         sshopts = "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
@@ -206,7 +203,6 @@ done
                 ),
             )
         )
-        pulumi.export(f"output_run_rsync-{self.id()}", self.rsync_resource.stdout)
 
     def create_instance(self):
         name = self.id()
@@ -310,10 +306,7 @@ class GCloudClient(GCloudInstance):
     def id(self):
         return f"client-{self.loc}"
 
-    def flags(self, master_ip):
-        frac_writes = 0.5
-        theta = 0.9
-        is_epaxos = False
+    def flags(self, master_ip, frac_writes=0.5, theta=0.9, is_epaxos=False):
         zipfian_flags = f"-c -1 -theta {theta}"
         flags = [
             f"-maddr {master_ip}",
@@ -355,7 +348,7 @@ class GCloudClient(GCloudInstance):
                 extra_depends_on=[self.run_resource],
             )
         )
-        pulumi.export(f"metrics-{self.loc}", self.metrics_resource.stdout)
+        pulumi.export(f"metrics-{self.id()}", self.metrics_resource.stdout)
 
 
 class EPaxosDeployment:
