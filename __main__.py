@@ -15,6 +15,22 @@ from pulumi_gcp.compute import (
 )
 
 
+TENK = 1e4
+HUNDK = 1e5
+MILLION = 1e6
+TENMIL = 1e7
+HUNDMIL = 1e8
+BILLION = 1e9
+
+LARGE_INT_TO_DESC = {
+    TENK: "10K",
+    HUNDK: "100K",
+    MILLION: "1M",
+    TENMIL: "10M",
+    HUNDMIL: "100M",
+    BILLION: "1B",
+}
+
 LOCATION_TO_INDEX = {
     "ca": 0,
     "va": 1,
@@ -113,6 +129,7 @@ sudo chown $(whoami):$(whoami) {SETUP_SCRIPT_PATH}
         host_str,
         delete_command=None,
         this_resource=None,
+        extra_depends_on=[],
     ):
         return remote.Command(
             f"{resource_prefix}-{self.id()}",
@@ -131,6 +148,7 @@ sudo chown $(whoami):$(whoami) {SETUP_SCRIPT_PATH}
                         self.rsync_resource,
                         self.instance_resource,
                     ]
+                    + extra_depends_on
                     if r is not None and r != this_resource
                 ]
             ),
@@ -145,7 +163,6 @@ sudo chown $(whoami):$(whoami) {SETUP_SCRIPT_PATH}
         run_setup_script = f"""\
 until {SETUP_SCRIPT_PATH}
 do
-    echo "Try again"
     sleep 2
 done
 """
@@ -233,16 +250,20 @@ class GCloudServer(GCloudInstance):
     def id(self):
         return f"server-{self.loc}"
 
-    def run(self, master_ip_output):
+    def run(self, master_ip_output, master_run_resource):
         def lambda_helper(internal_ip, external_ip, master_ip):
             port = 7070 + LOCATION_TO_INDEX[self.loc]
             flags = f" -port {port} -maddr {master_ip} -addr {internal_ip} -e "
-            server_command = "cd epaxos && " "bin/server {} > output.txt 2>&1 &".format(
-                flags
+            server_command = (
+                "cd epaxos && " "nohup bin/server {} > output.txt 2>&1 &".format(flags)
             )
             delete_command = "kill $(pidof bin/server)"
             self.run_remote_command(
-                "run_command", server_command, external_ip, delete_command
+                "run_command",
+                server_command,
+                external_ip,
+                delete_command=delete_command,
+                extra_depends_on=[master_run_resource],
             )
 
         self.run_resource = Output.all(
@@ -265,7 +286,8 @@ class GCloudMaster(GCloudInstance):
                 f"instance_resource has not been set on instance: {self.id()}, did create_instance() fail?"
             )
         master_command = (
-            "cd epaxos && " "bin/master -N {len_ips} -ips {ips} > moutput.txt 2>&1 &"
+            "cd epaxos && "
+            "nohup bin/master -N {len_ips} -ips {ips} > moutput.txt 2>&1 &"
         )
         self.run_resource = Output.all(
             self.ip(),
@@ -276,9 +298,10 @@ class GCloudMaster(GCloudInstance):
             ],
         ).apply(
             lambda ips: self.run_remote_command(
-                "command_run",
+                "run_command",
                 master_command.format(len_ips=len(ips) - 1, ips=",".join(ips[1:])),
                 ips[0],
+                delete_command="kill $(pidof bin/master)",
             )
         )
 
@@ -286,6 +309,53 @@ class GCloudMaster(GCloudInstance):
 class GCloudClient(GCloudInstance):
     def id(self):
         return f"client-{self.loc}"
+
+    def flags(self, master_ip):
+        frac_writes = 0.5
+        theta = 0.9
+        is_epaxos = False
+        zipfian_flags = f"-c -1 -theta {theta}"
+        flags = [
+            f"-maddr {master_ip}",
+            f"-T 10",  # number of virtual clients
+            f"-writes {frac_writes}",
+            zipfian_flags,
+        ]
+        if is_epaxos:
+            flags.append(f"-l {LOCATION_TO_INDEX[self.loc]}")
+        return " ".join(flags)
+
+    def run(self, master_ip_output, server_resources):
+        def lambda_helper(internal_ip, external_ip, master_ip):
+            flags = self.flags(master_ip)
+            client_command = (
+                f"cd epaxos && nohup bin/client {flags} > output.txt 2>&1 &"
+            )
+
+            delete_command = "kill $(pidof bin/client)"
+            self.run_remote_command(
+                "run_command",
+                client_command,
+                external_ip,
+                delete_command=delete_command,
+                extra_depends_on=server_resources,
+            )
+
+        self.run_resource = Output.all(
+            self.internal_ip(), self.ip(), master_ip_output
+        ).apply(lambda args: lambda_helper(*args))
+
+    def get_metrics(self):
+        metrics_command = "python3 epaxos/scripts/client_metrics.py"
+        self.metrics_resource = self.ip().apply(
+            lambda ip: self.run_remote_command(
+                "command_metrics",
+                metrics_command,
+                ip,
+                extra_depends_on=[self.run_resource],
+            )
+        )
+        pulumi.export(f"metrics-{self.loc}", self.metrics_resource.stdout)
 
 
 class EPaxosDeployment:
@@ -308,14 +378,19 @@ class EPaxosDeployment:
             deploy_instance(self.clients[loc])
 
     def run(self):
-        # while self.master.install_resource is None:
-        #     pulumi.log.info("Waiting for installation resources to be ready...")
-        #     pulumi.runtime.sleep(10)
         pulumi.info("Running master...")
         self.master.run_master(list(self.servers.values()))
         pulumi.info("Running servers...")
         for server in self.servers.values():
-            server.run(self.master.internal_ip())
+            server.run(self.master.internal_ip(), self.master.run_resource)
+        server_runs = [server.run_resource for server in self.servers.values()]
+        pulumi.info("Running clients...")
+        for client in self.clients.values():
+            client.run(self.master.internal_ip(), server_runs)
+
+    def get_metrics(self):
+        for client in self.clients.values():
+            client.get_metrics()
 
 
 # Main execution
@@ -323,3 +398,4 @@ config = pulumi.Config()
 deployment = EPaxosDeployment(config)
 deployment.deploy()
 deployment.run()
+deployment.get_metrics()
