@@ -2,8 +2,8 @@
 
 import base64
 import pulumi
-from typing import List
-from pulumi import Output
+from typing import List, NamedTuple
+from pulumi import Output, ComponentResource
 from pulumi_command import remote, local
 from pulumi.resource import ResourceOptions
 from pulumi_gcp.compute import (
@@ -86,6 +86,7 @@ class GCloudInstance:
         self.rsync_resource = None
         self.install_resource = None
         self.run_resource = None
+        self.metrics_resource = None
 
     def create_setup_script(self):
         epaxos_folder_name = (
@@ -130,6 +131,7 @@ sudo chown $(whoami):$(whoami) {SETUP_SCRIPT_PATH}
         delete_command=None,
         this_resource=None,
         extra_depends_on=[],
+        parent_resource=None,
     ):
         return remote.Command(
             f"{resource_prefix}-{self.id()}",
@@ -150,7 +152,8 @@ sudo chown $(whoami):$(whoami) {SETUP_SCRIPT_PATH}
                     ]
                     + extra_depends_on
                     if r is not None and r != this_resource
-                ]
+                ],
+                parent=parent_resource,
             ),
         )
 
@@ -254,7 +257,7 @@ class GCloudServer(GCloudInstance):
                 "cd epaxos && " "nohup bin/server {} > output.txt 2>&1 &".format(flags)
             )
             delete_command = "kill $(pidof bin/server)"
-            self.run_remote_command(
+            return self.run_remote_command(
                 "run_command",
                 server_command,
                 external_ip,
@@ -267,11 +270,38 @@ class GCloudServer(GCloudInstance):
         ).apply(lambda args: lambda_helper(*args))
 
 
+class Workload(NamedTuple):
+    is_epaxos: bool
+    frac_writes: float
+    theta: float
+
+    def id(self):
+        prot_str = "ep" if self.is_epaxos else "mp"
+        write_str = f"{int(self.frac_writes * 100)}"
+        theta_str = f"{int(self.theta* 100)}"
+        return f"{prot_str}_{write_str}_{theta_str}"
+
+
+class WorkloadRun(ComponentResource):
+    def __init__(self, name, master, clients, workload, opts=None):
+        super().__init__("WorkloadRun", name, None, opts)
+
+        outputs = {}
+        for client in list(clients.values())[2:]:
+            client.run(master.internal_ip(), workload, parent=self)
+
+        for client in list(clients.values())[2:]:
+            name, val = client.get_metrics(workload, parent=self)
+            outputs[name] = val
+
+        self.register_outputs(outputs)
+
+
 class GCloudClient(GCloudInstance):
     def id(self):
         return f"client-{self.loc}"
 
-    def flags(self, master_ip, frac_writes=0.5, theta=0.9, is_epaxos=False):
+    def flags(self, master_ip, is_epaxos=True, frac_writes=0.5, theta=0.9):
         zipfian_flags = f"-c -1 -theta {theta}"
         flags = [
             f"-maddr {master_ip}",
@@ -283,37 +313,57 @@ class GCloudClient(GCloudInstance):
             flags.append(f"-l {LOCATION_TO_INDEX[self.loc]}")
         return " ".join(flags)
 
-    def run(self, master_ip_output, server_resources):
+    def run(self, master_ip_output, workload: Workload, parent=None):
         def lambda_helper(internal_ip, external_ip, master_ip):
-            flags = self.flags(master_ip)
+            flags = self.flags(
+                master_ip,
+                is_epaxos=workload.is_epaxos,
+                frac_writes=workload.frac_writes,
+                theta=workload.theta,
+            )
             client_command = (
                 f"cd epaxos && nohup bin/client {flags} > output.txt 2>&1 &"
             )
 
             delete_command = "kill $(pidof bin/client)"
-            self.run_remote_command(
-                "run_command",
+            return self.run_remote_command(
+                f"command_run_{workload.id()}",
                 client_command,
                 external_ip,
                 delete_command=delete_command,
-                extra_depends_on=server_resources,
+                # extra_depends_on=dependencies,
+                parent_resource=parent,
             )
 
         self.run_resource = Output.all(
             self.internal_ip(), self.ip(), master_ip_output
         ).apply(lambda args: lambda_helper(*args))
 
-    def get_metrics(self):
+        # for i, x in enumerate(dependencies):
+        #     Output.all(x, self.run_resource).apply(
+        #         lambda v: pulumi.info(
+        #             f"run({i})-{workload.id()} @ {v[1]} depends on {v[0]}"
+        #         )
+        #     )
+
+    def get_metrics(self, workload: Workload, parent: WorkloadRun):
         metrics_command = "python3 epaxos/scripts/client_metrics.py"
         self.metrics_resource = self.ip().apply(
             lambda ip: self.run_remote_command(
-                "command_metrics",
+                f"command_metrics_{workload.id()}",
                 metrics_command,
                 ip,
                 extra_depends_on=[self.run_resource],
+                parent_resource=parent,
             )
         )
-        pulumi.export(f"metrics-{self.id()}", self.metrics_resource.stdout)
+        # Output.all(self.run_resource, self.metrics_resource).apply(
+        #     lambda v: pulumi.info(f"metrics_{workload.id()} @ {v[1]} depends on {v[0]}")
+        # )
+        return (
+            f"metrics_{workload.id()}-{self.id()}",
+            self.metrics_resource.stdout,
+        )
 
 
 class GCloudMaster(GCloudInstance):
@@ -370,25 +420,34 @@ class EPaxosDeployment:
             deploy_instance(self.servers[loc])
             deploy_instance(self.clients[loc])
 
-    def run(self):
+    def run_and_get_metrics(self):
         pulumi.info("Running master...")
         self.master.run_master(list(self.servers.values()))
+
         pulumi.info("Running servers...")
         for server in self.servers.values():
             server.run(self.master.internal_ip(), self.master.run_resource)
         server_runs = [server.run_resource for server in self.servers.values()]
-        pulumi.info("Running clients...")
-        for client in self.clients.values():
-            client.run(self.master.internal_ip(), server_runs)
 
-    def get_metrics(self):
-        for client in self.clients.values():
-            client.get_metrics()
+        pulumi.info("Running clients...")
+        is_epaxos = True
+        depends_on = server_runs
+        for frac_writes in (x / 10 for x in range(0, 2)):
+            for theta in (x / 10 for x in range(6, 8)):
+                workload = Workload(
+                    is_epaxos=is_epaxos, frac_writes=frac_writes, theta=theta
+                )
+                workload_run =  WorkloadRun(
+                    workload.id(),
+                    self.master,
+                    self.clients,
+                    workload,
+                    opts=ResourceOptions(depends_on=depends_on)
+                )
 
 
 # Main execution
 config = pulumi.Config()
 deployment = EPaxosDeployment(config)
 deployment.deploy()
-deployment.run()
-deployment.get_metrics()
+deployment.run_and_get_metrics()
