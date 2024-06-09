@@ -3,7 +3,7 @@
 import base64
 import pulumi
 from typing import List, NamedTuple
-from pulumi import Output, ComponentResource
+from pulumi import Output, ComponentResource, StackReference
 from pulumi_command import remote, local
 from pulumi.resource import ResourceOptions
 from pulumi_gcp.compute import (
@@ -14,6 +14,7 @@ from pulumi_gcp.compute import (
     InstanceNetworkInterfaceAccessConfigArgs,
 )
 
+DEV_STACK = "kenny1g/epaxos_revisited_replicated/dev"
 
 TENK = 1e4
 HUNDK = 1e5
@@ -42,27 +43,35 @@ SETUP_SCRIPT_PATH = "/usr/local/bin/setup_epaxos.sh"
 VM_IMAGE_URL = "https://www.googleapis.com/compute/beta/projects/ubuntu-os-pro-cloud/global/images/ubuntu-pro-1804-bionic-v20240516"
 
 
+if pulumi.get_stack() != "dev":
+    dev = StackReference(DEV_STACK)
 class GCloudInstance:
     def id(self):
         raise NotImplementedError()
 
     def ip(self):
-        if self.instance_resource is None:
-            raise ValueError(
-                f"""
-                instance has not been created on {self.loc}
-                """
-            )
-        return self.instance_resource.network_interfaces[0].access_configs[0].nat_ip
+        if pulumi.get_stack() == "dev":
+            if self.instance_resource is None:
+                raise ValueError(
+                    f"""
+                    instance has not been created on {self.loc}
+                    """
+                )
+            return self.instance_resource.network_interfaces[0].access_configs[0].nat_ip
+        else:
+            return dev.get_output(f"public_ip-{self.id()}")
 
     def internal_ip(self):
-        if self.instance_resource is None:
-            raise ValueError(
-                f"""
-                instance has not been created on {self.loc}
-                """
-            )
-        return self.instance_resource.network_interfaces[0].network_ip
+        if pulumi.get_stack() == "dev":
+            if self.instance_resource is None:
+                raise ValueError(
+                    f"""
+                    instance has not been created on {self.loc}
+                    """
+                )
+            return self.instance_resource.network_interfaces[0].network_ip
+        else:
+            return dev.get_output(f"private_ip-{self.id()}")
 
     def __init__(self, config, loc):
         self.config = config
@@ -232,7 +241,11 @@ done
         )
         pulumi.export(
             f"public_ip-{name}",
-            self.instance_resource.network_interfaces[0].access_configs[0].nat_ip,
+            self.ip(),
+        )
+        pulumi.export(
+            f"private_ip-{name}",
+            self.internal_ip(),
         )
 
     def zone(self):
@@ -253,10 +266,10 @@ class GCloudServer(GCloudInstance):
         def lambda_helper(internal_ip, external_ip, master_ip):
             port = 7070 + LOCATION_TO_INDEX[self.loc]
             flags = f" -port {port} -maddr {master_ip} -addr {internal_ip} -e "
-            server_command = (
-                "cd epaxos && " "nohup bin/server {} > output.txt 2>&1 &".format(flags)
+            server_command = "nohup epaxos/bin/server {} > output.txt 2>&1 &".format(
+                flags
             )
-            delete_command = "kill $(pidof bin/server)"
+            delete_command = "kill $(pidof epaxos/bin/server)"
             return self.run_remote_command(
                 "run_command",
                 server_command,
@@ -321,11 +334,9 @@ class GCloudClient(GCloudInstance):
                 frac_writes=workload.frac_writes,
                 theta=workload.theta,
             )
-            client_command = (
-                f"cd epaxos && nohup bin/client {flags} > output.txt 2>&1 &"
-            )
+            client_command = f"nohup epaxos/bin/client {flags} > output.txt 2>&1 &"
 
-            delete_command = "kill $(pidof bin/client)"
+            delete_command = "kill $(pidof epaxos/bin/client)"
             return self.run_remote_command(
                 f"command_run_{workload.id()}",
                 client_command,
@@ -339,13 +350,6 @@ class GCloudClient(GCloudInstance):
             self.internal_ip(), self.ip(), master_ip_output
         ).apply(lambda args: lambda_helper(*args))
 
-        # for i, x in enumerate(dependencies):
-        #     Output.all(x, self.run_resource).apply(
-        #         lambda v: pulumi.info(
-        #             f"run({i})-{workload.id()} @ {v[1]} depends on {v[0]}"
-        #         )
-        #     )
-
     def get_metrics(self, workload: Workload, parent: WorkloadRun):
         metrics_command = "python3 epaxos/scripts/client_metrics.py"
         self.metrics_resource = self.ip().apply(
@@ -357,9 +361,9 @@ class GCloudClient(GCloudInstance):
                 parent_resource=parent,
             )
         )
-        # Output.all(self.run_resource, self.metrics_resource).apply(
-        #     lambda v: pulumi.info(f"metrics_{workload.id()} @ {v[1]} depends on {v[0]}")
-        # )
+        pulumi.export(
+            f"metrics_{workload.id()}-{self.id()}", self.metrics_resource.stdout
+        )
         return (
             f"metrics_{workload.id()}-{self.id()}",
             self.metrics_resource.stdout,
@@ -374,20 +378,14 @@ class GCloudMaster(GCloudInstance):
         return f"master-{self.loc}"
 
     def run_master(self, server_instances: List[GCloudServer]):
-        if self.install_resource is None:
-            raise ValueError("Master instance is not ready")
-        if self.instance_resource is None:
-            raise ValueError(
-                f"instance_resource has not been set on instance: {self.id()}, did create_instance() fail?"
-            )
         master_command = (
-            "cd epaxos && "
-            "nohup bin/master -N {len_ips} -ips {ips} > moutput.txt 2>&1 &"
+            "nohup epaxos/bin/master -N {len_ips} -ips {ips} > moutput.txt 2>&1 &"
         )
+
         self.run_resource = Output.all(
             self.ip(),
             *[
-                server.instance_resource.network_interfaces[0].network_ip
+                server.internal_ip()
                 for server in server_instances
                 if server.instance_resource is not None
             ],
@@ -396,7 +394,7 @@ class GCloudMaster(GCloudInstance):
                 "run_command",
                 master_command.format(len_ips=len(ips) - 1, ips=",".join(ips[1:])),
                 ips[0],
-                delete_command="kill $(pidof bin/master)",
+                delete_command="kill $(pidof epaxos/bin/master)",
             )
         )
 
@@ -431,23 +429,26 @@ class EPaxosDeployment:
 
         pulumi.info("Running clients...")
         is_epaxos = True
-        depends_on = server_runs
+        depends_on = server_runs + [self.master.run_resource]
         for frac_writes in (x / 10 for x in range(0, 2)):
             for theta in (x / 10 for x in range(6, 8)):
                 workload = Workload(
                     is_epaxos=is_epaxos, frac_writes=frac_writes, theta=theta
                 )
-                workload_run =  WorkloadRun(
+                workload_run = WorkloadRun(
                     workload.id(),
                     self.master,
                     self.clients,
                     workload,
-                    opts=ResourceOptions(depends_on=depends_on)
+                    opts=ResourceOptions(depends_on=depends_on),
                 )
 
 
 # Main execution
 config = pulumi.Config()
 deployment = EPaxosDeployment(config)
-deployment.deploy()
-deployment.run_and_get_metrics()
+stack = pulumi.get_stack()
+if stack == "dev":
+    deployment.deploy()
+if stack == "experiments":
+    deployment.run_and_get_metrics()
