@@ -387,7 +387,6 @@ class GCloudMaster(GCloudInstance):
             *[
                 server.internal_ip()
                 for server in server_instances
-                if server.instance_resource is not None
             ],
         ).apply(
             lambda ips: self.run_remote_command(
