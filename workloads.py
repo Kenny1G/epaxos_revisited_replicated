@@ -20,10 +20,10 @@ class Workload(NamedTuple):
 
 
 LOCATION_TO_INDEX = {
-    "ca": 0,
+    "ca": 3,
     "va": 1,
     "eu": 2,
-    "or": 3,
+    "or": 0,
     "jp": 4,
 }
 
@@ -102,8 +102,9 @@ class GCloudClient:
     def gssh(self, cmd, desc):
         # To see the commands that are run on each machine, uncomment the
         # statements below.
-        print(cmd)
+        # print(cmd)
         # return lambda: None
+        print(f"Running '{cmd}' on {self.id()}")
         return utils.execute(
             self._gssh_cmd(cmd), "{}: {}".format(self.id(), desc)
         )
@@ -131,13 +132,17 @@ class GCloudClient:
     def run(self, master_ip, workload: Workload):
         flags = self.flags(master_ip, workload)
         client_command = (
-            f"nohup epaxos/bin/client {flags} > output_{workload.id()}.txt 2>&1 &"
+            f"cd epaxos && nohup bin/client {flags} > output_{workload.id()}.txt 2>&1 &"
         )
         return self.gssh(client_command, f"Running client for {workload.id()}")
 
     def kill(self):
-        kill_command = "killall client"
-        return self.gssh(kill_command, "Killing all clients")
+        kill_command = "kill $(pidof bin/client)"
+        return self.gssh(kill_command, f"Killing all client on {self.id()}")
+
+    def clean_logs(self):
+        clean_command = "nohup rm epaxos/lattput.txt && nohup rm epaxos/latency.txt"
+        return self.gssh(clean_command, f"Cleaning logs on {self.id()}")
 
     def get_metrics(self, workload: Workload):
         metrics_command = "python3 epaxos/scripts/client_metrics.py"
@@ -174,31 +179,41 @@ def main(is_epaxos: bool):
     # all_workloads_metrics = AllWorkloadsMetrics(workloads={workload.id(): workload_metrics})
     all_workloads_metrics = AllWorkloadsMetrics(workloads={})
 
-    for frac_writes in (x / 10 for x in range(0, 1)):
-        for theta in (x / 10 for x in range(6, 7)):
+    # for _, client in clients.items():
+    #     remove_output = client.clean_logs()
+    for frac_writes in (x / 10 for x in range(0, 2)):
+        for theta in (x / 100 for x in range(60, 80, 5)):
             workload = Workload(
                 is_epaxos=is_epaxos, frac_writes=frac_writes, theta=theta
             )
-            print(workload)
+            print('####################################')
+            print(f'#####{workload}#####')
+            print('####################################')
             workload_metrics = WorkloadMetrics(clients={})
             for _, client in clients.items():
-                # print("dummy run")
-                output = client.run(master_ip, workload)
-                print(output())
-                metrics_output = client.get_metrics(workload)
-                # get metrics
-                metrics_data = json.loads(metrics_output())
-                metrics_data = MetricsData(**metrics_data)
-                workload_metrics.clients[client.id()] = metrics_data
+                    try:
+                        output = client.run(master_ip, workload)
+                        # print(output())
+                        utils.sleep_verbose('Stabilizing', 5)
+                    finally:
+                        kill_output = client.kill()
+                        print(kill_output())
+                    try:
+                        # get metrics
+                        metrics_output = client.get_metrics(workload)
+                        metrics_data = json.loads(metrics_output())
+                        metrics_data = MetricsData(**metrics_data)
+                        workload_metrics.clients[client.id()] = metrics_data
+                    except:
+                        continue
 
-                # Populate workload metrics
             all_workloads_metrics.workloads[workload.id()] = workload_metrics
 
     # Print the final metrics for verification
-    with open('workload_metrics.json', 'w') as file:
+    file_name = f'{'ep' if is_epaxos else 'mp'}_workload_metrics.json'
+    with open(file_name, 'w') as file:
         json.dump(all_workloads_metrics.model_dump(), file, indent=4)
-    print("Workload metrics have been written to 'workload_metrics.json'")
-    print(json.dumps(all_workloads_metrics.model_dump(), indent=4))
+    print(f"Workload metrics have been written to '{file_name}'")
 
 
 

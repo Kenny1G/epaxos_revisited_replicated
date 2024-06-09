@@ -1,6 +1,9 @@
 import psutil
 import subprocess
 import sys
+import time
+from tqdm import tqdm
+
 def execute(cmd, desc):
     """
     Runs 'command' as a shell process, returning a function handler that will
@@ -46,3 +49,13 @@ def complete_process(process, desc):
 
     del process
     return out
+
+def sleep_verbose(message, delay):
+    """
+    Pauses program execution for 'delay' seconds. Prints '[message]: x/delay',
+    where x indicates the number of seconds that have passed so far, updated
+    every second.
+    """
+    for i in tqdm(range(delay), desc=message, total=delay,
+        bar_format='{desc}: {n_fmt}/{total_fmt}'):
+        time.sleep(1)
