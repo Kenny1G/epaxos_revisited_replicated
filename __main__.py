@@ -2,8 +2,10 @@
 
 import base64
 import pulumi
+import utils
 from typing import List, NamedTuple
 from pulumi import Output, ComponentResource, StackReference
+import pulumiverse_time as time
 from pulumi_command import remote, local
 from pulumi.resource import ResourceOptions
 from pulumi_gcp.compute import (
@@ -45,6 +47,8 @@ VM_IMAGE_URL = "https://www.googleapis.com/compute/beta/projects/ubuntu-os-pro-c
 
 if pulumi.get_stack() != "dev":
     dev = StackReference(DEV_STACK)
+
+
 class GCloudInstance:
     def id(self):
         raise NotImplementedError()
@@ -301,12 +305,18 @@ class WorkloadRun(ComponentResource):
 
         outputs = {}
         for client in list(clients.values())[2:]:
-            client.run(master.internal_ip(), workload, parent=self)
+            clnt_run = client.run(master.internal_ip(), workload, parent=self)
+            self.clnt_run = client.run_resource
 
         for client in list(clients.values())[2:]:
-            name, val = client.get_metrics(workload, parent=self)
-            outputs[name] = val
+            self.mname, self.mval = client.get_metrics(workload, parent=self)
+            outputs[self.mname] = self.mval
 
+        self.time = time.Sleep(
+            f"time_{self.mname}",
+            create_duration="2s",
+            opts=pulumi.ResourceOptions(parent=self, depends_on=[self.clnt_run]),
+        )
         self.register_outputs(outputs)
 
 
@@ -384,10 +394,7 @@ class GCloudMaster(GCloudInstance):
 
         self.run_resource = Output.all(
             self.ip(),
-            *[
-                server.internal_ip()
-                for server in server_instances
-            ],
+            *[server.internal_ip() for server in server_instances],
         ).apply(
             lambda ips: self.run_remote_command(
                 "run_command",
@@ -426,21 +433,22 @@ class EPaxosDeployment:
             server.run(self.master.internal_ip(), self.master.run_resource)
         server_runs = [server.run_resource for server in self.servers.values()]
 
-        pulumi.info("Running clients...")
-        is_epaxos = True
-        depends_on = server_runs + [self.master.run_resource]
-        for frac_writes in (x / 10 for x in range(0, 2)):
-            for theta in (x / 10 for x in range(6, 8)):
-                workload = Workload(
-                    is_epaxos=is_epaxos, frac_writes=frac_writes, theta=theta
-                )
-                workload_run = WorkloadRun(
-                    workload.id(),
-                    self.master,
-                    self.clients,
-                    workload,
-                    opts=ResourceOptions(depends_on=depends_on),
-                )
+        # pulumi.info("Running clients...")
+        # is_epaxos = True
+        # depends_on = server_runs + [self.master.run_resource]
+        # for frac_writes in (x / 10 for x in range(0, 2)):
+        #     for theta in (x / 10 for x in range(6, 8)):
+        #         workload = Workload(
+        #             is_epaxos=is_epaxos, frac_writes=frac_writes, theta=theta
+        #         )
+        #         workload_run = WorkloadRun(
+        #             workload.id(),
+        #             self.master,
+        #             self.clients,
+        #             workload,
+        #             opts=ResourceOptions(depends_on=depends_on),
+        #         )
+        #         depends_on = workload_run.time
 
 
 # Main execution
