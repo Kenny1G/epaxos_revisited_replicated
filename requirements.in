@@ -2,3 +2,7 @@ pulumi==3.116.1
 pulumi-command==0.11.1
 pulumi-gcp==7.23.0
 pulumiverse_time
+typer
+psutil
+pydantic
+tqdm
