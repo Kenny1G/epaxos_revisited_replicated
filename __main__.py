@@ -269,7 +269,8 @@ class GCloudServer(GCloudInstance):
     def run(self, master_ip_output, master_run_resource):
         def lambda_helper(internal_ip, external_ip, master_ip):
             port = 7070 + LOCATION_TO_INDEX[self.loc]
-            flags = f" -port {port} -maddr {master_ip} -addr {internal_ip} -e "
+            # flags = f" -port {port} -maddr {master_ip} -addr {internal_ip} -e " # -e for epaxos
+            flags = f" -port {port} -maddr {master_ip} -addr {internal_ip} "
             server_command = "nohup epaxos/bin/server {} > output.txt 2>&1 &".format(
                 flags
             )

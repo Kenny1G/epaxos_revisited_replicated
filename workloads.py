@@ -178,11 +178,12 @@ def main(is_epaxos: bool):
     # Populate all workloads metrics
     # all_workloads_metrics = AllWorkloadsMetrics(workloads={workload.id(): workload_metrics})
     all_workloads_metrics = AllWorkloadsMetrics(workloads={})
+    file_name = f'{'ep' if is_epaxos else 'mp'}_workload_metrics.json'
 
     # for _, client in clients.items():
     #     remove_output = client.clean_logs()
-    for frac_writes in (x / 10 for x in range(0, 2)):
-        for theta in (x / 100 for x in range(60, 80, 5)):
+    for frac_writes in (x / 10 for x in range(0, 11)):
+        for theta in (x / 100 for x in range(60, 105, 5)):
             workload = Workload(
                 is_epaxos=is_epaxos, frac_writes=frac_writes, theta=theta
             )
@@ -193,8 +194,8 @@ def main(is_epaxos: bool):
             for _, client in clients.items():
                     try:
                         output = client.run(master_ip, workload)
-                        # print(output())
-                        utils.sleep_verbose('Stabilizing', 5)
+                        print(output())
+                        utils.sleep_verbose('Stabilizing', 10)
                     finally:
                         kill_output = client.kill()
                         print(kill_output())
@@ -208,11 +209,10 @@ def main(is_epaxos: bool):
                         continue
 
             all_workloads_metrics.workloads[workload.id()] = workload_metrics
+        # Print the final metrics for verification
+        with open(file_name, 'w') as file:
+            json.dump(all_workloads_metrics.model_dump(), file, indent=4)
 
-    # Print the final metrics for verification
-    file_name = f'{'ep' if is_epaxos else 'mp'}_workload_metrics.json'
-    with open(file_name, 'w') as file:
-        json.dump(all_workloads_metrics.model_dump(), file, indent=4)
     print(f"Workload metrics have been written to '{file_name}'")
 
 
