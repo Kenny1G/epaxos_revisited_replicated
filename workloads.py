@@ -20,10 +20,10 @@ class Workload(NamedTuple):
 
 
 LOCATION_TO_INDEX = {
-    "ca": 3,
+    "or": 0,
     "va": 1,
     "eu": 2,
-    "or": 0,
+    "ca": 3,
     "jp": 4,
 }
 
