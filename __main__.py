@@ -35,10 +35,10 @@ LARGE_INT_TO_DESC = {
 }
 
 LOCATION_TO_INDEX = {
-    "ca": 0,
+    "ca": 1,
     "va": 1,
     "eu": 2,
-    "or": 3,
+    "or": 0,
     "jp": 4,
 }
 SETUP_SCRIPT_PATH = "/usr/local/bin/setup_epaxos.sh"
